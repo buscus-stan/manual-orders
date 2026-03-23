@@ -10,15 +10,15 @@ module BrowserSession
   # Path for Chrome user data (cookies, localStorage, etc.)
   PROFILE_PATH = File.expand_path(ENV.fetch('SELENIUM_PROFILE_PATH', '~/storage/work/selenium-profile'))
 
-  def self.setup(headless: false)
+  def self.setup
     Capybara.register_driver :chrome_persistent do |app|
       options = Selenium::WebDriver::Chrome::Options.new
       options.add_argument("--user-data-dir=#{PROFILE_PATH}")
-      options.add_argument('--disable-gpu')
-      options.add_argument('--no-sandbox')
-      options.add_argument('--headless') if headless
-      # Optional: set window size
       options.add_argument('--window-size=1440,800')
+      options.add_argument('--disable-blink-features=AutomationControlled')
+      options.add_argument('--disable-infobars')
+      options.add_preference('credentials_enable_service', false)
+      options.add_preference('profile.password_manager_enabled', false)
 
       Capybara::Selenium::Driver.new(app, browser: :chrome, options: options)
     end
@@ -34,14 +34,36 @@ class MexcFiller
 
   LOGIN_URL = 'https://www.mexc.com/login'
 
-  # Initialize and start a persistent browser session
-  # headless: true to run without UI after initial login
-  def initialize(headless: false)
-    BrowserSession.setup(headless: headless)
+  STEALTH_JS = <<~JS
+    // Remove webdriver flag
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+
+    // Patch chrome.runtime to look like a real Chrome instance
+    if (!window.chrome) { window.chrome = {}; }
+    if (!window.chrome.runtime) {
+      window.chrome.runtime = {
+        connect: function() {},
+        sendMessage: function() {}
+      };
+    }
+
+    // Ensure navigator.plugins is non-empty
+    Object.defineProperty(navigator, 'plugins', {
+      get: () => [1, 2, 3, 4, 5]
+    });
+
+    // Ensure navigator.languages is realistic
+    Object.defineProperty(navigator, 'languages', {
+      get: () => ['en-US', 'en']
+    });
+  JS
+
+  def initialize
+    BrowserSession.setup
   end
 
   def open_browser
-    visit 'https://www.mexc.com'
+    visit_and_settle('https://www.mexc.com')
     puts "When done, return here and press ENTER to close browser..."
     STDIN.gets
     puts "Browser closed."
@@ -49,7 +71,7 @@ class MexcFiller
 
   # Opens the login page; perform manual login + TFA here
   def start_login_session
-    visit LOGIN_URL
+    visit_and_settle(LOGIN_URL)
     puts "Please log in and complete any TFA in the opened browser."
     puts "When done, return here and press ENTER to continue..."
     STDIN.gets
@@ -65,37 +87,38 @@ class MexcFiller
   end
 
   def place_buy_order(ticker:, price:, quantity:, tp: nil, tp_percentage: nil)
-    visit trading_portal_url(ticker)
+    visit_and_settle(trading_portal_url(ticker))
 
     if has_selector?('.header_loginBtn__Zb0Hx', text: 'Log In', wait: 5)
       start_login_session
-
-      visit trading_portal_url(ticker)
+      visit_and_settle(trading_portal_url(ticker))
     end
+
+    random_scroll
 
     within ".actions_dirBtnWrapper__CNiH6" do
-      find('div.actions_buyBtn__ySCEX').click # click BUY
+      human_click(find('div.actions_buyBtn__ySCEX'))
     end
 
-    find('input[data-testid="spot-trade-buyPrice"]').set(price.to_d.to_s('F'))
-    find('input[data-testid="spot-trade-buyQuantity"]').set(quantity.to_s)
+    human_type(find('input[data-testid="spot-trade-buyPrice"]'), price.to_d.to_s('F'))
+    human_type(find('input[data-testid="spot-trade-buyQuantity"]'), quantity.to_s)
 
     tp ||= tp_percentage ? price * (1 + tp_percentage/100.0) : nil
 
     if tp
       within '.actions_profitLoseWrappper__u5k9Y' do
-        find('label.ant-checkbox-v2-wrapper', text: 'TP / SL').click
-        sleep 0.25
-        find('.actions_inputWrapper__OKcnB input', match: :first).set(tp.to_d.to_s('F'))
+        human_click(find('label.ant-checkbox-v2-wrapper', text: 'TP / SL'))
+        human_delay(0.2, 0.5)
+        human_type(find('.actions_inputWrapper__OKcnB input', match: :first), tp.to_d.to_s('F'))
       end
     end
 
-    click_on "Buy #{ticker}"
-    sleep 0.25
+    human_click(find('button', text: "Buy #{ticker}"))
+    human_delay(0.3, 0.8)
 
     within '.ant-modal-body' do
-      click_on "Buy #{ticker}"
-      sleep 0.25
+      human_click(find('button', text: "Buy #{ticker}"))
+      human_delay(0.3, 0.8)
     end
 
     if has_text?('Ordered successfully', wait: 5)
@@ -108,27 +131,28 @@ class MexcFiller
   end
 
   def place_sell_order(ticker:, price:, quantity:)
-    visit trading_portal_url(ticker)
+    visit_and_settle(trading_portal_url(ticker))
 
     if has_selector?('.header_loginBtn__Zb0Hx', text: 'Log In', wait: 5)
       start_login_session
-
-      visit trading_portal_url(ticker)
+      visit_and_settle(trading_portal_url(ticker))
     end
+
+    random_scroll
 
     within ".actions_dirBtnWrapper__CNiH6" do
-      find('div.actions_sellBtn__WE9kM').click # click SELL
+      human_click(find('div.actions_sellBtn__WE9kM'))
     end
 
-    find('input[data-testid="spot-trade-sellPrice"]').set(price.to_d.to_s('F'))
-    find('input[data-testid="spot-trade-sellQuantity"]').set(quantity.to_s)
+    human_type(find('input[data-testid="spot-trade-sellPrice"]'), price.to_d.to_s('F'))
+    human_type(find('input[data-testid="spot-trade-sellQuantity"]'), quantity.to_s)
 
-    click_on "Sell #{ticker}"
-    sleep 1
+    human_click(find('button', text: "Sell #{ticker}"))
+    human_delay(0.5, 1.2)
 
     within '.ant-modal-body' do
-      click_on "Sell #{ticker}"
-      sleep 1
+      human_click(find('button', text: "Sell #{ticker}"))
+      human_delay(0.5, 1.2)
     end
 
     if has_text?('Ordered successfully', wait: 5)
@@ -140,20 +164,62 @@ class MexcFiller
     end
   end
 
+  private
+
   def trading_portal_url(ticker)
     "https://www.mexc.com/exchange/#{ticker}_USDT"
+  end
+
+  def inject_stealth_js
+    page.driver.browser.execute_cdp('Page.addScriptToEvaluateOnNewDocument', source: STEALTH_JS)
+  rescue => e
+    warn "Stealth JS injection failed: #{e.message}"
+  end
+
+  def visit_and_settle(url)
+    visit(url)
+    inject_stealth_js
+    human_delay(1.5, 3.0)
+  end
+
+  def human_delay(min = 0.3, max = 1.2)
+    sleep rand(min..max)
+  end
+
+  def human_type(element, text)
+    element.click
+    human_delay(0.1, 0.3)
+    element.native.clear
+    text.to_s.each_char do |char|
+      element.native.send_keys(char)
+      sleep rand(0.04..0.12)
+    end
+  end
+
+  def human_click(element)
+    driver = page.driver.browser
+    action = driver.action
+    action.move_to(element.native, rand(-3..3), rand(-3..3))
+    action.pause(rand(0.1..0.3))
+    action.click
+    action.perform
+  end
+
+  def random_scroll
+    page.execute_script("window.scrollBy(0, #{rand(50..200)})")
+    human_delay(0.3, 0.8)
   end
 end
 
 # === Example Usage ===
 #
 # 1) First run (GUI mode):
-bot = MexcFiller.new(headless: false)
+bot = MexcFiller.new
 bot.start_login_session
 # bot.open_browser
 #
-# 2) Subsequent runs (headless or not):
-# bot = MexcFiller.new(headless: false)
+# 2) Subsequent runs:
+# bot = MexcFiller.new
 
 # bot.place_buy_order(ticker: "SOVM", price: 0.000317, quantity: 50000.0)
 # bot.place_buy_order(ticker: "SOVM", price: 0.00034, quantity: 94588.23)
